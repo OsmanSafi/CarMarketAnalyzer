@@ -1,10 +1,11 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.market_service import get_market_listings
 from app.services.nhtsa_service import decode_vin
 from app.services.pricing_service import analyze_market
-import os
 
 app = FastAPI(
     title="Car Market Analyzer API",
