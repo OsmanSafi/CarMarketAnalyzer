@@ -1,16 +1,30 @@
+import asyncio
 import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.dealer_economics_service import (
+    AccidentHistory,
+    MechanicalIssues,
+    TitleStatus,
+    VehicleCondition,
+    estimate_dealer_economics,
+)
 from app.services.market_service import get_market_listings
+from app.services.marketcheck_service import get_marketcheck_price
 from app.services.nhtsa_service import decode_vin
 from app.services.pricing_service import analyze_market
+from app.services.valuation_consensus_service import (
+    build_valuation_consensus,
+)
 
 app = FastAPI(
     title="Car Market Analyzer API",
-    description=("Open-source multi-source automotive pricing and valuation platform"),
-    version="0.6.0",
+    description=(
+        "Open-source multi-source automotive pricing and dealer economics platform"
+    ),
+    version="0.9.0",
 )
 
 cors_origins = os.getenv(
@@ -31,7 +45,7 @@ app.add_middleware(
 def home():
     return {
         "name": "Car Market Analyzer",
-        "version": "0.6.0",
+        "version": "0.9.0",
         "status": "running",
     }
 
@@ -93,16 +107,28 @@ async def get_valuation(
     vin: str,
     mileage: int,
     zip_code: str,
+    condition: VehicleCondition = "unknown",
+    accident_history: AccidentHistory = "unknown",
+    title_status: TitleStatus = "unknown",
+    mechanical_issues: MechanicalIssues = "unknown",
+    asking_price: float | None = None,
 ):
     vehicle = await decode_vin(vin)
 
-    market_data = await get_market_listings(
-        year=vehicle["year"],
-        make=vehicle["make"],
-        model=vehicle["model"],
-        trim=vehicle["trim"],
-        mileage=mileage,
-        zip_code=zip_code,
+    market_data, marketcheck_data = await asyncio.gather(
+        get_market_listings(
+            year=vehicle["year"],
+            make=vehicle["make"],
+            model=vehicle["model"],
+            trim=vehicle["trim"],
+            mileage=mileage,
+            zip_code=zip_code,
+        ),
+        get_marketcheck_price(
+            vin=vin,
+            mileage=mileage,
+            zip_code=zip_code,
+        ),
     )
 
     analysis = analyze_market(
@@ -113,6 +139,64 @@ async def get_valuation(
         subject_vin=vehicle["vin"],
     )
 
+    internal_value = analysis.get("estimated_market_value")
+
+    marketcheck_value = marketcheck_data.get("marketcheck_price")
+
+    marketcheck_comparison = None
+
+    if (
+        internal_value is not None
+        and marketcheck_value is not None
+        and marketcheck_value > 0
+    ):
+        difference = marketcheck_value - internal_value
+
+        difference_percent = difference / marketcheck_value * 100
+
+        marketcheck_comparison = {
+            "difference": round(
+                difference,
+                2,
+            ),
+            "difference_percent": round(
+                difference_percent,
+                2,
+            ),
+        }
+
+    external_valuations = {
+        "marketcheck": {
+            "status": marketcheck_data.get("status"),
+            "retail_value": marketcheck_value,
+            "msrp": marketcheck_data.get("msrp"),
+            "comparison_to_internal": (marketcheck_comparison),
+        }
+    }
+
+    valuation_consensus = build_valuation_consensus(
+        internal_value=internal_value,
+        internal_confidence=analysis["confidence"],
+        marketcheck_value=marketcheck_value,
+    )
+
+    consensus_value = valuation_consensus.get("consensus_value")
+
+    dealer_economics = None
+
+    if consensus_value is not None:
+        dealer_economics = estimate_dealer_economics(
+            retail_market_value=(consensus_value),
+            mileage=mileage,
+            subject_year=vehicle["year"],
+            confidence=valuation_consensus["confidence"],
+            condition=condition,
+            accident_history=(accident_history),
+            title_status=title_status,
+            mechanical_issues=(mechanical_issues),
+            asking_price=asking_price,
+        )
+
     return {
         "vehicle": {
             **vehicle,
@@ -120,6 +204,9 @@ async def get_valuation(
             "zip_code": zip_code,
         },
         "market_analysis": analysis,
+        "external_valuations": (external_valuations),
+        "valuation_consensus": (valuation_consensus),
+        "dealer_economics": (dealer_economics),
         "market_data": {
             "provider_counts": market_data["provider_counts"],
             "provider_status": market_data["provider_status"],
