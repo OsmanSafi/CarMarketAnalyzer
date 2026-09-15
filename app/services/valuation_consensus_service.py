@@ -1,68 +1,275 @@
-from statistics import mean
+from statistics import median
+
+
+BASE_WEIGHTS = {
+    "dealer_market_comparables": 1.60,
+    "marketcheck": 1.00,
+    "carsxe_retail": 1.00,
+    # Ready for future integrations.
+    "kbb_retail": 1.10,
+    "vinaudit_retail": 1.00,
+}
+
+
+INTERNAL_CONFIDENCE_MULTIPLIER = {
+    "high": 1.25,
+    "medium": 1.00,
+    "low": 0.65,
+}
+
+
+def valid_value(
+    value: float | None,
+) -> bool:
+    return value is not None and value > 0
+
+
+def build_source(
+    source: str,
+    value: float,
+    weight: float,
+) -> dict:
+    return {
+        "source": source,
+        "value": float(value),
+        "base_weight": weight,
+        "effective_weight": weight,
+        "outlier_adjusted": False,
+    }
+
+
+def apply_outlier_adjustment(
+    sources: list[dict],
+) -> list[dict]:
+    if len(sources) < 3:
+        return sources
+
+    values = [source["value"] for source in sources]
+
+    center = median(values)
+
+    if center <= 0:
+        return sources
+
+    adjusted_sources = []
+
+    for source in sources:
+        source_copy = source.copy()
+
+        difference_percent = abs(source["value"] - center) / center
+
+        # We do not delete a conflicting
+        # valuation source. We reduce its
+        # influence if it is far outside
+        # the rest of the market evidence.
+        if difference_percent > 0.15:
+            source_copy["effective_weight"] *= 0.50
+
+            source_copy["outlier_adjusted"] = True
+
+        adjusted_sources.append(source_copy)
+
+    return adjusted_sources
+
+
+def calculate_weighted_value(
+    sources: list[dict],
+) -> float | None:
+    if not sources:
+        return None
+
+    weighted_total = 0.0
+    total_weight = 0.0
+
+    for source in sources:
+        weight = source["effective_weight"]
+
+        weighted_total += source["value"] * weight
+
+        total_weight += weight
+
+    if total_weight <= 0:
+        return None
+
+    return weighted_total / total_weight
+
+
+def determine_agreement(
+    spread_percent: float,
+) -> str:
+    if spread_percent <= 5:
+        return "strong"
+
+    if spread_percent <= 10:
+        return "reasonable"
+
+    if spread_percent <= 18:
+        return "mixed"
+
+    return "weak"
+
+
+def determine_confidence(
+    source_count: int,
+    internal_confidence: str,
+    spread_percent: float,
+) -> str:
+    if source_count >= 3 and internal_confidence == "high" and spread_percent <= 10:
+        return "high"
+
+    if (
+        source_count >= 2
+        and internal_confidence in {"high", "medium"}
+        and spread_percent <= 18
+    ):
+        return "medium"
+
+    return "low"
 
 
 def build_valuation_consensus(
     internal_value: float | None,
     internal_confidence: str,
     marketcheck_value: float | None,
-    carsxe_retail_value: float | None = None,
+    carsxe_retail_value: (float | None) = None,
+    kbb_retail_value: (float | None) = None,
+    vinaudit_retail_value: (float | None) = None,
 ) -> dict:
-    external_benchmarks = []
+    sources: list[dict] = []
 
-    if marketcheck_value is not None and marketcheck_value > 0:
-        external_benchmarks.append(
-            {
-                "source": "marketcheck",
-                "value": float(marketcheck_value),
-            }
+    if valid_value(internal_value):
+        internal_multiplier = INTERNAL_CONFIDENCE_MULTIPLIER.get(
+            internal_confidence,
+            0.65,
         )
 
-    if carsxe_retail_value is not None and carsxe_retail_value > 0:
-        external_benchmarks.append(
-            {
-                "source": "carsxe_clean_retail",
-                "value": float(carsxe_retail_value),
-            }
+        internal_weight = (
+            BASE_WEIGHTS["dealer_market_comparables"] * internal_multiplier
         )
 
-    # Dealer-market comparables are now the
-    # primary source of fair sale value.
-    if internal_value is None or internal_value <= 0:
+        sources.append(
+            build_source(
+                source=("dealer_market_comparables"),
+                value=internal_value,
+                weight=internal_weight,
+            )
+        )
+
+    if valid_value(marketcheck_value):
+        sources.append(
+            build_source(
+                source="marketcheck",
+                value=marketcheck_value,
+                weight=BASE_WEIGHTS["marketcheck"],
+            )
+        )
+
+    if valid_value(carsxe_retail_value):
+        sources.append(
+            build_source(
+                source="carsxe_retail",
+                value=carsxe_retail_value,
+                weight=BASE_WEIGHTS["carsxe_retail"],
+            )
+        )
+
+    if valid_value(kbb_retail_value):
+        sources.append(
+            build_source(
+                source="kbb_retail",
+                value=kbb_retail_value,
+                weight=BASE_WEIGHTS["kbb_retail"],
+            )
+        )
+
+    if valid_value(vinaudit_retail_value):
+        sources.append(
+            build_source(
+                source="vinaudit_retail",
+                value=vinaudit_retail_value,
+                weight=BASE_WEIGHTS["vinaudit_retail"],
+            )
+        )
+
+    if not sources:
         return {
+            "fair_market_value": None,
             "fair_sale_value": None,
             "consensus_value": None,
-            "primary_source": ("dealer_market_comparables"),
-            "internal_confidence": (internal_confidence),
+            "source_count": 0,
+            "sources": [],
             "confidence": "low",
-            "external_benchmarks": (external_benchmarks),
-            "external_average": None,
-            "external_average_difference": (None),
-            "external_average_difference_percent": (None),
-            "validation_status": ("no_primary_market_value"),
-            "method": ("market_comparables_primary_external_validation"),
+            "agreement": "unavailable",
+            "method": ("multi_source_weighted_retail"),
+            "warning": ("No usable retail valuation sources were available."),
         }
 
-    fair_sale_value = float(internal_value)
+    sources = apply_outlier_adjustment(sources)
 
-    benchmark_results = []
+    consensus_value = calculate_weighted_value(sources)
 
-    for benchmark in external_benchmarks:
-        benchmark_value = benchmark["value"]
+    if consensus_value is None:
+        return {
+            "fair_market_value": None,
+            "fair_sale_value": None,
+            "consensus_value": None,
+            "source_count": len(sources),
+            "sources": sources,
+            "confidence": "low",
+            "agreement": "unavailable",
+            "method": ("multi_source_weighted_retail"),
+            "warning": ("Retail market value could not be calculated."),
+        }
 
-        difference = benchmark_value - fair_sale_value
+    source_values = [source["value"] for source in sources]
 
-        difference_percent = difference / fair_sale_value * 100
+    minimum_value = min(source_values)
 
-        benchmark_results.append(
+    maximum_value = max(source_values)
+
+    spread = maximum_value - minimum_value
+
+    spread_percent = spread / consensus_value * 100 if consensus_value > 0 else 0.0
+
+    agreement = determine_agreement(spread_percent)
+
+    confidence = determine_confidence(
+        source_count=len(sources),
+        internal_confidence=(internal_confidence),
+        spread_percent=(spread_percent),
+    )
+
+    source_results = []
+
+    for source in sources:
+        difference = source["value"] - consensus_value
+
+        difference_percent = (
+            difference / consensus_value * 100 if consensus_value > 0 else 0.0
+        )
+
+        source_results.append(
             {
-                "source": (benchmark["source"]),
+                "source": (source["source"]),
                 "value": round(
-                    benchmark_value,
+                    source["value"],
                     2,
                 ),
-                "difference": round(
-                    difference,
+                "base_weight": round(
+                    source["base_weight"],
                     2,
+                ),
+                "effective_weight": (
+                    round(
+                        source["effective_weight"],
+                        2,
+                    )
+                ),
+                "difference_from_consensus": (
+                    round(
+                        difference,
+                        2,
+                    )
                 ),
                 "difference_percent": (
                     round(
@@ -70,104 +277,69 @@ def build_valuation_consensus(
                         2,
                     )
                 ),
+                "outlier_adjusted": (source["outlier_adjusted"]),
             }
         )
 
-    external_average = None
-    external_difference = None
-    external_difference_percent = None
+    warning = None
 
-    if external_benchmarks:
-        external_average = mean(benchmark["value"] for benchmark in external_benchmarks)
-
-        external_difference = external_average - fair_sale_value
-
-        external_difference_percent = external_difference / fair_sale_value * 100
-
-        absolute_difference_percent = abs(external_difference_percent)
-
-        if absolute_difference_percent <= 5:
-            validation_status = "aligned"
-
-        elif absolute_difference_percent <= 10:
-            validation_status = "reasonable_variance"
-
-        else:
-            validation_status = "divergent"
-
-    else:
-        validation_status = "external_validation_unavailable"
-
-    # External providers validate the market
-    # estimate but do not change its value.
-    if internal_confidence == "high":
-        if validation_status == "aligned":
-            final_confidence = "high"
-
-        elif validation_status == "reasonable_variance":
-            final_confidence = "medium"
-
-        elif validation_status == "external_validation_unavailable":
-            final_confidence = "high"
-
-        else:
-            final_confidence = "low"
-
-    elif internal_confidence == "medium":
-        if validation_status in {
-            "aligned",
-            "reasonable_variance",
-        }:
-            final_confidence = "medium"
-
-        elif validation_status == "external_validation_unavailable":
-            final_confidence = "medium"
-
-        else:
-            final_confidence = "low"
-
-    else:
-        final_confidence = "low"
+    if agreement == "weak":
+        warning = (
+            "Retail valuation sources "
+            "show substantial disagreement. "
+            "Review the comparable vehicles "
+            "and vehicle details before "
+            "relying on this estimate."
+        )
 
     return {
-        "fair_sale_value": round(
-            fair_sale_value,
+        "fair_market_value": round(
+            consensus_value,
             2,
         ),
         # Kept for compatibility with
-        # main.py and dealer economics.
-        "consensus_value": round(
-            fair_sale_value,
+        # existing frontend/backend naming.
+        "fair_sale_value": round(
+            consensus_value,
             2,
         ),
-        "primary_source": ("dealer_market_comparables"),
+        "consensus_value": round(
+            consensus_value,
+            2,
+        ),
+        "comparable_market_value": (
+            round(
+                internal_value,
+                2,
+            )
+            if valid_value(internal_value)
+            else None
+        ),
+        "source_count": len(sources),
+        "source_range": {
+            "low": round(
+                minimum_value,
+                2,
+            ),
+            "high": round(
+                maximum_value,
+                2,
+            ),
+        },
+        "source_spread": round(
+            spread,
+            2,
+        ),
+        "source_spread_percent": (
+            round(
+                spread_percent,
+                2,
+            )
+        ),
+        "sources": (source_results),
         "internal_confidence": (internal_confidence),
-        "confidence": (final_confidence),
-        "external_benchmarks": (benchmark_results),
-        "external_average": (
-            round(
-                external_average,
-                2,
-            )
-            if external_average is not None
-            else None
-        ),
-        "external_average_difference": (
-            round(
-                external_difference,
-                2,
-            )
-            if external_difference is not None
-            else None
-        ),
-        "external_average_difference_percent": (
-            round(
-                external_difference_percent,
-                2,
-            )
-            if external_difference_percent is not None
-            else None
-        ),
-        "validation_status": (validation_status),
-        "method": ("market_comparables_primary_external_validation"),
+        "agreement": agreement,
+        "confidence": confidence,
+        "method": ("multi_source_weighted_retail"),
+        "warning": warning,
     }
