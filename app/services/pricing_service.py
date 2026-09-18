@@ -6,7 +6,6 @@ from statistics import mean, median
 
 from app.models.vehicle import ComparableListing
 
-
 MIN_TRIM_SAMPLE = 3
 
 
@@ -744,7 +743,7 @@ def calculate_comparable_score(
         score += points
 
         if reason:
-            reasons.append((f"{reason} ({points:+d})"))
+            reasons.append(f"{reason} ({points:+d})")
 
     score = max(
         0,

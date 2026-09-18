@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import "./App.css";
+
+type Mode = "buy" | "trade";
 
 type Comparable = {
   score: number;
@@ -11,8 +13,11 @@ type Comparable = {
   make: string | null;
   model: string | null;
   trim: string | null;
-  price: number;
+  raw_price?: number;
+  adjusted_price?: number;
+  price?: number;
   mileage: number | null;
+  days_on_market?: number | null;
   city: string | null;
   state: string | null;
   listing_url: string | null;
@@ -26,49 +31,104 @@ type Vehicle = {
   trim: string | null;
   mileage: number;
   zip_code: string;
+  state?: string | null;
 };
 
 type MarketAnalysis = {
-  estimated_market_value: number | null;
+  comparable_market_value?: number | null;
+  estimated_market_value?: number | null;
 
-  fair_purchase_range: {
+  fair_purchase_value?: number | null;
+
+  fair_purchase_range?: {
     low: number;
     high: number;
   } | null;
 
-  estimated_trade_range: {
-    low: number;
-    high: number;
-    midpoint: number;
+  asking_price_analysis?: {
+    asking_price: number;
+    difference_from_fair_market?: number | null;
+    difference_from_fair_purchase?: number | null;
   } | null;
 
   confidence: string;
   selected_comparable_count: number;
   raw_listing_count: number;
-  validated_listing_count: number;
+  validated_listing_count?: number;
   invalid_listings_removed: number;
+
+  providers_used?: number;
   warning: string | null;
+
   top_comparables: Comparable[];
+};
+
+type ValuationConsensus = {
+  fair_market_value: number | null;
+  source_count: number;
+  agreement: string;
+  confidence: string;
+
+  source_range?: {
+    low: number;
+    high: number;
+  } | null;
+};
+
+type TradeValuation = {
+  estimated_trade_value: number | null;
+
+  trade_range?: {
+    low: number;
+    high: number;
+  } | null;
+
+  best_actual_offer?: {
+    source?: string;
+    value?: number;
+  } | null;
+
+  source_count: number;
+  actual_offer_count: number;
+  confidence: string;
 };
 
 type ValuationResponse = {
   vehicle: Vehicle;
   market_analysis: MarketAnalysis;
+
+  valuation_consensus?: ValuationConsensus | null;
+
+  trade_valuation?: TradeValuation | null;
+
+  listing_inputs?: {
+    asking_price?: number | null;
+    days_on_market?: number | null;
+  };
+
+  trade_inputs?: {
+    carmax_offer?: number | null;
+    carvana_offer?: number | null;
+    dealer_offer?: number | null;
+  };
 };
 
 type ValidationErrors = {
   vin?: string;
   mileage?: string;
   zipCode?: string;
+  dealerValue?: string;
 };
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const API_URL =
+  import.meta.env.VITE_API_URL ??
+  "http://127.0.0.1:8000";
 
 function currency(
   value: number | null | undefined,
 ) {
   if (value == null) {
-    return "N/A";
+    return "—";
   }
 
   return new Intl.NumberFormat("en-US", {
@@ -78,11 +138,11 @@ function currency(
   }).format(value);
 }
 
-function formatMileage(
+function number(
   value: number | null | undefined,
 ) {
   if (value == null) {
-    return "N/A";
+    return "—";
   }
 
   return new Intl.NumberFormat(
@@ -90,10 +150,11 @@ function formatMileage(
   ).format(value);
 }
 
-function validateForm(
+function validateCommonFields(
   vin: string,
   mileage: string,
   zipCode: string,
+  dealerValue: string,
 ): ValidationErrors {
   const errors: ValidationErrors = {};
 
@@ -101,13 +162,10 @@ function validateForm(
     .trim()
     .toUpperCase();
 
-  const vinPattern =
-    /^[A-HJ-NPR-Z0-9]{17}$/;
-
-  if (!normalizedVin) {
-    errors.vin = "VIN is required.";
-  } else if (
-    !vinPattern.test(normalizedVin)
+  if (
+    !/^[A-HJ-NPR-Z0-9]{17}$/.test(
+      normalizedVin,
+    )
   ) {
     errors.vin =
       "Enter a valid 17-character VIN.";
@@ -115,23 +173,30 @@ function validateForm(
 
   const mileageNumber = Number(mileage);
 
-  if (!mileage.trim()) {
-    errors.mileage =
-      "Mileage is required.";
-  } else if (
+  if (
+    mileage.trim() === "" ||
     !Number.isInteger(mileageNumber) ||
-    mileageNumber < 0
+    mileageNumber < 0 ||
+    mileageNumber > 500000
   ) {
     errors.mileage =
       "Enter a valid mileage.";
-  } else if (mileageNumber > 500000) {
-    errors.mileage =
-      "Mileage must be 500,000 or less.";
   }
 
   if (!/^\d{5}$/.test(zipCode.trim())) {
     errors.zipCode =
       "Enter a valid 5-digit ZIP code.";
+  }
+
+  const offer = Number(dealerValue);
+
+  if (
+    dealerValue.trim() === "" ||
+    !Number.isFinite(offer) ||
+    offer <= 0
+  ) {
+    errors.dealerValue =
+      "Enter the dealer's offer.";
   }
 
   return errors;
@@ -157,20 +222,47 @@ async function getApiError(
         .filter(Boolean)
         .join(", ");
     }
-
-    return "Unable to analyze vehicle.";
   } catch {
-    return "Unable to analyze vehicle.";
+    // Fall through to default.
   }
+
+  return "Unable to analyze this vehicle.";
 }
 
 function App() {
+  const [mode, setMode] =
+    useState<Mode>("buy");
+
   const [vin, setVin] = useState("");
-  const [miles, setMiles] = useState("");
+  const [mileage, setMileage] =
+    useState("");
   const [zipCode, setZipCode] =
     useState("");
 
-  const [result, setResult] =
+  const [
+    dealerValue,
+    setDealerValue,
+  ] = useState("");
+
+  const [
+    daysOnMarket,
+    setDaysOnMarket,
+  ] = useState("");
+
+  const [
+    carmaxOffer,
+    setCarmaxOffer,
+  ] = useState("");
+
+  const [
+    carvanaOffer,
+    setCarvanaOffer,
+  ] = useState("");
+
+  const [
+    result,
+    setResult,
+  ] =
     useState<ValuationResponse | null>(
       null,
     );
@@ -178,7 +270,8 @@ function App() {
   const [
     validationErrors,
     setValidationErrors,
-  ] = useState<ValidationErrors>({});
+  ] =
+    useState<ValidationErrors>({});
 
   const [loading, setLoading] =
     useState(false);
@@ -186,20 +279,37 @@ function App() {
   const [error, setError] =
     useState("");
 
+  function resetResults() {
+    setResult(null);
+    setError("");
+    setValidationErrors({});
+  }
+
+  function changeMode(
+    nextMode: Mode,
+  ) {
+    setMode(nextMode);
+    resetResults();
+  }
+
   async function handleSubmit(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
 
-    const errors = validateForm(
-      vin,
-      miles,
-      zipCode,
-    );
+    const errors =
+      validateCommonFields(
+        vin,
+        mileage,
+        zipCode,
+        dealerValue,
+      );
 
     setValidationErrors(errors);
 
-    if (Object.keys(errors).length > 0) {
+    if (
+      Object.keys(errors).length > 0
+    ) {
       return;
     }
 
@@ -213,19 +323,51 @@ function App() {
           vin: vin
             .trim()
             .toUpperCase(),
-          mileage: miles.trim(),
+          mileage: mileage.trim(),
           zip_code: zipCode.trim(),
         });
+
+      if (mode === "buy") {
+        params.set(
+          "asking_price",
+          dealerValue.trim(),
+        );
+
+        if (daysOnMarket.trim()) {
+          params.set(
+            "days_on_market",
+            daysOnMarket.trim(),
+          );
+        }
+      } else {
+        params.set(
+          "dealer_offer",
+          dealerValue.trim(),
+        );
+
+        if (carmaxOffer.trim()) {
+          params.set(
+            "carmax_offer",
+            carmaxOffer.trim(),
+          );
+        }
+
+        if (carvanaOffer.trim()) {
+          params.set(
+            "carvana_offer",
+            carvanaOffer.trim(),
+          );
+        }
+      }
 
       const response = await fetch(
         `${API_URL}/valuation?${params.toString()}`,
       );
 
       if (!response.ok) {
-        const message =
-          await getApiError(response);
-
-        throw new Error(message);
+        throw new Error(
+          await getApiError(response),
+        );
       }
 
       const data =
@@ -251,525 +393,886 @@ function App() {
     }
   }
 
-  const analysis =
-    result?.market_analysis;
+  const marketValue = useMemo(() => {
+    if (!result) {
+      return null;
+    }
 
-  const vehicle = result?.vehicle;
+    return (
+      result.valuation_consensus
+        ?.fair_market_value ??
+      result.market_analysis
+        .comparable_market_value ??
+      result.market_analysis
+        .estimated_market_value ??
+      null
+    );
+  }, [result]);
 
-  const hasMarketValue =
-    analysis?.estimated_market_value !=
-    null &&
-    analysis.selected_comparable_count >
-    0;
+  const fairPurchaseValue =
+    result?.market_analysis
+      .fair_purchase_value ?? null;
+
+  const tradeValue =
+    result?.trade_valuation
+      ?.estimated_trade_value ?? null;
+
+  const dealerNumber =
+    dealerValue.trim()
+      ? Number(dealerValue)
+      : null;
+
+  const purchaseGap =
+    mode === "buy" &&
+      dealerNumber != null &&
+      fairPurchaseValue != null
+      ? dealerNumber -
+      fairPurchaseValue
+      : null;
+
+  const tradeGap =
+    mode === "trade" &&
+      dealerNumber != null &&
+      tradeValue != null
+      ? dealerNumber - tradeValue
+      : null;
+
+  const purchaseRange =
+    result?.market_analysis
+      .fair_purchase_range ?? null;
+
+  const tradeRange =
+    result?.trade_valuation
+      ?.trade_range ?? null;
+
+  const topComparables =
+    result?.market_analysis
+      .top_comparables ?? [];
 
   return (
-    <main className="app-shell">
-      <header className="navbar">
-        <div className="brand">
-          <div className="brand-mark">
-            C
+    <div className="site-shell">
+      <header className="site-header">
+        <div className="header-inner">
+          <div className="brand">
+            <div className="brand-symbol">
+              CM
+            </div>
+
+            <div>
+              <strong>
+                Car Market Analyzer
+              </strong>
+
+              <span>
+                Deal intelligence
+              </span>
+            </div>
           </div>
 
-          <div>
-            <strong>
-              Car Market Analyzer
-            </strong>
-
-            <span>
-              Vehicle pricing
-              intelligence
-            </span>
+          <div className="header-meta">
+            Independent market analysis
           </div>
-        </div>
-
-        <div className="api-status">
-          <span className="status-dot" />
-
-          Market data connected
         </div>
       </header>
 
-      <section className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">
-            Automotive market
-            intelligence
-          </p>
+      <main className="page">
+        <section className="intro">
+          <div className="intro-copy">
+            <p className="section-kicker">
+              Deal analysis
+            </p>
 
-          <h1>
-            Know what a car is
-            <span> actually worth.</span>
-          </h1>
-
-          <p className="hero-description">
-            Decode a VIN, analyze
-            marketplace listings, compare
-            similar vehicles, and estimate
-            fair retail and trade-in value.
-          </p>
-        </div>
-
-        <form
-          className="search-card"
-          onSubmit={handleSubmit}
-          noValidate
-        >
-          <div className="search-header">
-            <div>
-              <p className="card-label">
-                Vehicle valuation
-              </p>
-
-              <h2>
-                Analyze a vehicle
-              </h2>
-            </div>
-
-            <span className="beta-badge">
-              BETA
-            </span>
-          </div>
-
-          <label>
-            VIN
-
-            <input
-              value={vin}
-              onChange={(event) => {
-                setVin(
-                  event.target.value
-                    .toUpperCase(),
-                );
-
-                setValidationErrors(
-                  (current) => ({
-                    ...current,
-                    vin: undefined,
-                  }),
-                );
-              }}
-              placeholder="17-character VIN"
-              maxLength={17}
-              className={
-                validationErrors.vin
-                  ? "input-error"
-                  : ""
-              }
-            />
-
-            {validationErrors.vin && (
-              <span className="field-error">
-                {validationErrors.vin}
-              </span>
-            )}
-          </label>
-
-          <div className="field-grid">
-            <label>
-              Mileage
-
-              <input
-                type="number"
-                value={miles}
-                onChange={(event) => {
-                  setMiles(
-                    event.target.value,
-                  );
-
-                  setValidationErrors(
-                    (current) => ({
-                      ...current,
-                      mileage: undefined,
-                    }),
-                  );
-                }}
-                placeholder="105000"
-                min="0"
-                className={
-                  validationErrors.mileage
-                    ? "input-error"
-                    : ""
-                }
-              />
-
-              {validationErrors.mileage && (
-                <span className="field-error">
-                  {
-                    validationErrors.mileage
-                  }
-                </span>
-              )}
-            </label>
-
-            <label>
-              ZIP code
-
-              <input
-                value={zipCode}
-                onChange={(event) => {
-                  const value =
-                    event.target.value.replace(
-                      /\D/g,
-                      "",
-                    );
-
-                  setZipCode(value);
-
-                  setValidationErrors(
-                    (current) => ({
-                      ...current,
-                      zipCode: undefined,
-                    }),
-                  );
-                }}
-                placeholder="93960"
-                maxLength={5}
-                inputMode="numeric"
-                className={
-                  validationErrors.zipCode
-                    ? "input-error"
-                    : ""
-                }
-              />
-
-              {validationErrors.zipCode && (
-                <span className="field-error">
-                  {
-                    validationErrors.zipCode
-                  }
-                </span>
-              )}
-            </label>
-          </div>
-
-          <button
-            className="analyze-button"
-            type="submit"
-            disabled={loading}
-          >
-            {loading
-              ? "Analyzing market..."
-              : "Analyze vehicle"}
-          </button>
-
-          <p className="search-note">
-            Estimates are based on
-            available marketplace data and
-            comparable vehicle listings.
-          </p>
-        </form>
-      </section>
-
-      {loading && (
-        <section className="loading-card">
-          <div className="loader" />
-
-          <div>
-            <strong>
-              Analyzing vehicle
-            </strong>
+            <h1>
+              Know the numbers before
+              you negotiate.
+            </h1>
 
             <p>
-              Decoding the VIN, searching
-              market listings, and scoring
-              comparable vehicles.
+              Compare a dealer's offer
+              against current market
+              evidence before you sign.
             </p>
           </div>
         </section>
-      )}
 
-      {error && (
-        <section className="error-card">
-          <strong>
-            Unable to analyze vehicle
-          </strong>
+        <section className="workspace">
+          <aside className="analysis-panel">
+            <div className="mode-switch">
+              <button
+                type="button"
+                className={
+                  mode === "buy"
+                    ? "mode-button active"
+                    : "mode-button"
+                }
+                onClick={() =>
+                  changeMode("buy")
+                }
+              >
+                Buying
+              </button>
 
-          <p>{error}</p>
-        </section>
-      )}
+              <button
+                type="button"
+                className={
+                  mode === "trade"
+                    ? "mode-button active"
+                    : "mode-button"
+                }
+                onClick={() =>
+                  changeMode("trade")
+                }
+              >
+                Trading in
+              </button>
+            </div>
 
-      {result &&
-        analysis &&
-        vehicle &&
-        !hasMarketValue && (
-          <section className="no-data-card">
-            <p className="eyebrow">
-              Vehicle identified
-            </p>
-
-            <h2>
-              {vehicle.year}{" "}
-              {vehicle.make}{" "}
-              {vehicle.model}
-            </h2>
-
-            <p className="no-data-trim">
-              {vehicle.trim ||
-                "Trim unavailable"}{" "}
-              ·{" "}
-              {formatMileage(
-                vehicle.mileage,
-              )}{" "}
-              miles
-            </p>
-
-            <div className="no-data-message">
-              <strong>
-                Not enough comparable
-                market data
-              </strong>
+            <div className="panel-heading">
+              <h2>
+                {mode === "buy"
+                  ? "Analyze a purchase"
+                  : "Analyze a trade offer"}
+              </h2>
 
               <p>
-                We successfully decoded
-                this vehicle, but there
-                aren't enough similar
-                listings available right
-                now to generate a reliable
-                valuation.
+                {mode === "buy"
+                  ? "Enter the vehicle and the price the dealer is asking."
+                  : "Enter your vehicle and the trade value the dealer offered."}
               </p>
-
-              {analysis.warning && (
-                <small>
-                  {analysis.warning}
-                </small>
-              )}
-            </div>
-          </section>
-        )}
-
-      {result &&
-        analysis &&
-        vehicle &&
-        hasMarketValue && (
-          <section className="results">
-            <div className="vehicle-heading">
-              <div>
-                <p className="eyebrow">
-                  Valuation result
-                </p>
-
-                <h2>
-                  {vehicle.year}{" "}
-                  {vehicle.make}{" "}
-                  {vehicle.model}
-                </h2>
-
-                <p>
-                  {vehicle.trim ||
-                    "Unknown trim"}{" "}
-                  ·{" "}
-                  {formatMileage(
-                    vehicle.mileage,
-                  )}{" "}
-                  miles · ZIP{" "}
-                  {vehicle.zip_code}
-                </p>
-              </div>
-
-              <div
-                className={`confidence confidence-${analysis.confidence}`}
-              >
-                {analysis.confidence}{" "}
-                confidence
-              </div>
             </div>
 
-            <div className="value-grid">
-              <article className="value-card primary">
-                <span>
-                  Estimated market value
-                </span>
+            <form
+              onSubmit={handleSubmit}
+              noValidate
+              className="valuation-form"
+            >
+              <label>
+                <span>VIN</span>
 
-                <strong>
-                  {currency(
-                    analysis.estimated_market_value,
-                  )}
-                </strong>
+                <input
+                  value={vin}
+                  maxLength={17}
+                  placeholder="17-character VIN"
+                  onChange={(event) => {
+                    setVin(
+                      event.target.value
+                        .toUpperCase(),
+                    );
 
-                <small>
-                  Based on{" "}
-                  {
-                    analysis.selected_comparable_count
-                  }{" "}
-                  selected comparables
-                </small>
-              </article>
-
-              <article className="value-card">
-                <span>
-                  Fair purchase range
-                </span>
-
-                <strong>
-                  {analysis.fair_purchase_range
-                    ? `${currency(
-                      analysis
-                        .fair_purchase_range
-                        .low,
-                    )} – ${currency(
-                      analysis
-                        .fair_purchase_range
-                        .high,
-                    )}`
-                    : "N/A"}
-                </strong>
-
-                <small>
-                  Suggested retail buying
-                  range
-                </small>
-              </article>
-
-              <article className="value-card">
-                <span>
-                  Estimated trade value
-                </span>
-
-                <strong>
-                  {analysis.estimated_trade_range
-                    ? currency(
-                      analysis
-                        .estimated_trade_range
-                        .midpoint,
-                    )
-                    : "N/A"}
-                </strong>
-
-                <small>
-                  {analysis.estimated_trade_range
-                    ? `${currency(
-                      analysis
-                        .estimated_trade_range
-                        .low,
-                    )} – ${currency(
-                      analysis
-                        .estimated_trade_range
-                        .high,
-                    )}`
-                    : ""}
-                </small>
-              </article>
-            </div>
-
-            <div className="market-summary">
-              <div>
-                <strong>
-                  {
-                    analysis.raw_listing_count
+                    setValidationErrors(
+                      (current) => ({
+                        ...current,
+                        vin: undefined,
+                      }),
+                    );
+                  }}
+                  className={
+                    validationErrors.vin
+                      ? "invalid"
+                      : ""
                   }
-                </strong>
+                />
 
-                <span>
-                  Market listings scanned
-                </span>
-              </div>
+                {validationErrors.vin && (
+                  <small className="field-error">
+                    {
+                      validationErrors.vin
+                    }
+                  </small>
+                )}
+              </label>
 
-              <div>
-                <strong>
-                  {
-                    analysis.selected_comparable_count
-                  }
-                </strong>
+              <div className="form-row">
+                <label>
+                  <span>Mileage</span>
 
-                <span>
-                  Strong comparables used
-                </span>
-              </div>
+                  <input
+                    type="number"
+                    min="0"
+                    value={mileage}
+                    placeholder="75000"
+                    onChange={(
+                      event,
+                    ) => {
+                      setMileage(
+                        event.target.value,
+                      );
 
-              <div>
-                <strong>
-                  {
-                    analysis.invalid_listings_removed
-                  }
-                </strong>
+                      setValidationErrors(
+                        (current) => ({
+                          ...current,
+                          mileage:
+                            undefined,
+                        }),
+                      );
+                    }}
+                    className={
+                      validationErrors.mileage
+                        ? "invalid"
+                        : ""
+                    }
+                  />
 
-                <span>
-                  Invalid listings removed
-                </span>
-              </div>
-            </div>
-
-            <div className="comparables-section">
-              <div className="section-heading">
-                <p className="eyebrow">
-                  Comparable vehicles
-                </p>
-
-                <h2>
-                  Top market matches
-                </h2>
-              </div>
-
-              <div className="comparables-grid">
-                {analysis.top_comparables.map(
-                  (comp) => (
-                    <article
-                      className="comparable-card"
-                      key={
-                        comp.vin ??
-                        `${comp.year}-${comp.price}-${comp.mileage}`
+                  {validationErrors.mileage && (
+                    <small className="field-error">
+                      {
+                        validationErrors.mileage
                       }
-                    >
-                      <div className="comp-top">
+                    </small>
+                  )}
+                </label>
+
+                <label>
+                  <span>ZIP code</span>
+
+                  <input
+                    value={zipCode}
+                    maxLength={5}
+                    inputMode="numeric"
+                    placeholder="93960"
+                    onChange={(
+                      event,
+                    ) => {
+                      setZipCode(
+                        event.target.value.replace(
+                          /\D/g,
+                          "",
+                        ),
+                      );
+
+                      setValidationErrors(
+                        (current) => ({
+                          ...current,
+                          zipCode:
+                            undefined,
+                        }),
+                      );
+                    }}
+                    className={
+                      validationErrors.zipCode
+                        ? "invalid"
+                        : ""
+                    }
+                  />
+
+                  {validationErrors.zipCode && (
+                    <small className="field-error">
+                      {
+                        validationErrors.zipCode
+                      }
+                    </small>
+                  )}
+                </label>
+              </div>
+
+              <label>
+                <span>
+                  {mode === "buy"
+                    ? "Dealer asking price"
+                    : "Dealer trade offer"}
+                </span>
+
+                <div className="money-input">
+                  <span>$</span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    value={dealerValue}
+                    placeholder={
+                      mode === "buy"
+                        ? "28000"
+                        : "15000"
+                    }
+                    onChange={(
+                      event,
+                    ) => {
+                      setDealerValue(
+                        event.target.value,
+                      );
+
+                      setValidationErrors(
+                        (current) => ({
+                          ...current,
+                          dealerValue:
+                            undefined,
+                        }),
+                      );
+                    }}
+                  />
+                </div>
+
+                {validationErrors.dealerValue && (
+                  <small className="field-error">
+                    {
+                      validationErrors.dealerValue
+                    }
+                  </small>
+                )}
+              </label>
+
+              {mode === "buy" ? (
+                <label>
+                  <span>
+                    Days on market
+                    <em>Optional</em>
+                  </span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    value={daysOnMarket}
+                    placeholder="50"
+                    onChange={(
+                      event,
+                    ) =>
+                      setDaysOnMarket(
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+              ) : (
+                <div className="optional-offers">
+                  <div className="optional-heading">
+                    <strong>
+                      Other offers
+                    </strong>
+
+                    <span>
+                      Optional
+                    </span>
+                  </div>
+
+                  <div className="form-row">
+                    <label>
+                      <span>
+                        CarMax offer
+                      </span>
+
+                      <div className="money-input">
+                        <span>$</span>
+
+                        <input
+                          type="number"
+                          min="0"
+                          value={
+                            carmaxOffer
+                          }
+                          placeholder="15400"
+                          onChange={(
+                            event,
+                          ) =>
+                            setCarmaxOffer(
+                              event.target
+                                .value,
+                            )
+                          }
+                        />
+                      </div>
+                    </label>
+
+                    <label>
+                      <span>
+                        Carvana offer
+                      </span>
+
+                      <div className="money-input">
+                        <span>$</span>
+
+                        <input
+                          type="number"
+                          min="0"
+                          value={
+                            carvanaOffer
+                          }
+                          placeholder="15800"
+                          onChange={(
+                            event,
+                          ) =>
+                            setCarvanaOffer(
+                              event.target
+                                .value,
+                            )
+                          }
+                        />
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={loading}
+              >
+                {loading
+                  ? "Analyzing..."
+                  : "Analyze offer"}
+              </button>
+
+              <p className="form-disclaimer">
+                Estimates are based on
+                available market data and
+                are not dealer records or
+                guaranteed transaction
+                prices.
+              </p>
+            </form>
+          </aside>
+
+          <section className="results-panel">
+            {!result &&
+              !loading &&
+              !error && (
+                <div className="empty-state">
+                  <div className="empty-rule" />
+
+                  <span>
+                    Market analysis
+                  </span>
+
+                  <h2>
+                    Your deal analysis
+                    will appear here.
+                  </h2>
+
+                  <p>
+                    Enter the vehicle
+                    information and the
+                    dealer's offer to
+                    compare it with
+                    current market
+                    evidence.
+                  </p>
+                </div>
+              )}
+
+            {loading && (
+              <div className="loading-state">
+                <div className="spinner" />
+
+                <div>
+                  <strong>
+                    Analyzing market data
+                  </strong>
+
+                  <p>
+                    Comparing the vehicle
+                    with available
+                    listings and
+                    valuation sources.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="error-state">
+                <strong>
+                  Analysis unavailable
+                </strong>
+
+                <p>{error}</p>
+              </div>
+            )}
+
+            {result && (
+              <div className="results-content">
+                <div className="vehicle-summary">
+                  <div>
+                    <p className="section-kicker">
+                      Analysis
+                    </p>
+
+                    <h2>
+                      {
+                        result.vehicle
+                          .year
+                      }{" "}
+                      {
+                        result.vehicle
+                          .make
+                      }{" "}
+                      {
+                        result.vehicle
+                          .model
+                      }
+                    </h2>
+
+                    <p>
+                      {result.vehicle
+                        .trim ||
+                        "Trim unavailable"}
+                      {" · "}
+                      {number(
+                        result.vehicle
+                          .mileage,
+                      )}{" "}
+                      miles
+                    </p>
+                  </div>
+
+                  <div className="confidence-label">
+                    {
+                      result
+                        .market_analysis
+                        .confidence
+                    }{" "}
+                    confidence
+                  </div>
+                </div>
+
+                {mode === "buy" ? (
+                  <>
+                    <div className="deal-summary">
+                      <div className="main-number">
+                        <span>
+                          Dealer asking
+                        </span>
+
+                        <strong>
+                          {currency(
+                            dealerNumber,
+                          )}
+                        </strong>
+                      </div>
+
+                      <div className="comparison-numbers">
                         <div>
+                          <span>
+                            Fair market
+                          </span>
+
                           <strong>
-                            {comp.year}{" "}
-                            {comp.make}{" "}
-                            {comp.model}
+                            {currency(
+                              marketValue,
+                            )}
                           </strong>
+                        </div>
+
+                        <div>
+                          <span>
+                            Fair purchase
+                            target
+                          </span>
+
+                          <strong>
+                            {currency(
+                              fairPurchaseValue,
+                            )}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    {purchaseGap != null && (
+                      <div
+                        className={
+                          purchaseGap > 0
+                            ? "deal-message caution"
+                            : "deal-message positive"
+                        }
+                      >
+                        <strong>
+                          {purchaseGap > 0
+                            ? `${currency(
+                              purchaseGap,
+                            )} above the estimated fair purchase target`
+                            : `${currency(
+                              Math.abs(
+                                purchaseGap,
+                              ),
+                            )} below the estimated fair purchase target`}
+                        </strong>
+
+                        <p>
+                          {purchaseRange
+                            ? `Current market evidence suggests a fair purchase range of ${currency(
+                              purchaseRange.low,
+                            )} to ${currency(
+                              purchaseRange.high,
+                            )}.`
+                            : "The estimate is based on currently available market evidence."}
+                        </p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="deal-summary">
+                      <div className="main-number">
+                        <span>
+                          Dealer trade
+                          offer
+                        </span>
+
+                        <strong>
+                          {currency(
+                            dealerNumber,
+                          )}
+                        </strong>
+                      </div>
+
+                      <div className="comparison-numbers">
+                        <div>
+                          <span>
+                            Estimated
+                            trade value
+                          </span>
+
+                          <strong>
+                            {currency(
+                              tradeValue,
+                            )}
+                          </strong>
+                        </div>
+
+                        <div>
+                          <span>
+                            Fair trade
+                            range
+                          </span>
+
+                          <strong className="range-value">
+                            {tradeRange
+                              ? `${currency(
+                                tradeRange.low,
+                              )} – ${currency(
+                                tradeRange.high,
+                              )}`
+                              : "—"}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    {tradeGap != null && (
+                      <div
+                        className={
+                          tradeGap < 0
+                            ? "deal-message caution"
+                            : "deal-message positive"
+                        }
+                      >
+                        <strong>
+                          {tradeGap < 0
+                            ? `${currency(
+                              Math.abs(
+                                tradeGap,
+                              ),
+                            )} below the estimated trade value`
+                            : `${currency(
+                              tradeGap,
+                            )} above the estimated trade value`}
+                        </strong>
+
+                        <p>
+                          Compare this
+                          number with any
+                          independent cash
+                          offers before
+                          accepting the
+                          dealer's trade
+                          value.
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div className="evidence-section">
+                  <div className="section-title-row">
+                    <div>
+                      <span>
+                        Market evidence
+                      </span>
+
+                      <h3>
+                        What supports this
+                        estimate
+                      </h3>
+                    </div>
+                  </div>
+
+                  <div className="evidence-grid">
+                    <div>
+                      <strong>
+                        {
+                          result
+                            .market_analysis
+                            .raw_listing_count
+                        }
+                      </strong>
+
+                      <span>
+                        Listings reviewed
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong>
+                        {
+                          result
+                            .market_analysis
+                            .selected_comparable_count
+                        }
+                      </strong>
+
+                      <span>
+                        Comparables used
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong>
+                        {result
+                          .valuation_consensus
+                          ?.source_count ??
+                          1}
+                      </strong>
+
+                      <span>
+                        Valuation sources
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong className="capitalize">
+                        {result
+                          .valuation_consensus
+                          ?.agreement ??
+                          result
+                            .market_analysis
+                            .confidence}
+                      </strong>
+
+                      <span>
+                        Source agreement
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {topComparables.length >
+                  0 && (
+                    <div className="comparables-section">
+                      <div className="section-title-row">
+                        <div>
+                          <span>
+                            Comparables
+                          </span>
+
+                          <h3>
+                            Closest market
+                            matches
+                          </h3>
+                        </div>
+                      </div>
+
+                      <div className="comparables-table">
+                        <div className="table-header">
+                          <span>
+                            Vehicle
+                          </span>
 
                           <span>
-                            {comp.trim ||
-                              "Unknown trim"}
+                            Mileage
+                          </span>
+
+                          <span>
+                            Price
+                          </span>
+
+                          <span>
+                            Location
                           </span>
                         </div>
 
-                        <div className="match-score">
-                          {comp.score}
-                        </div>
+                        {topComparables
+                          .slice(0, 6)
+                          .map(
+                            (
+                              comparable,
+                            ) => {
+                              const price =
+                                comparable.adjusted_price ??
+                                comparable.raw_price ??
+                                comparable.price ??
+                                null;
+
+                              return (
+                                <div
+                                  className="table-row"
+                                  key={
+                                    comparable.vin ??
+                                    `${comparable.year}-${price}-${comparable.mileage}`
+                                  }
+                                >
+                                  <div>
+                                    <strong>
+                                      {
+                                        comparable.year
+                                      }{" "}
+                                      {
+                                        comparable.make
+                                      }{" "}
+                                      {
+                                        comparable.model
+                                      }
+                                    </strong>
+
+                                    <span>
+                                      {comparable.trim ||
+                                        "Trim unavailable"}
+                                    </span>
+                                  </div>
+
+                                  <span>
+                                    {number(
+                                      comparable.mileage,
+                                    )}{" "}
+                                    mi
+                                  </span>
+
+                                  <strong>
+                                    {currency(
+                                      price,
+                                    )}
+                                  </strong>
+
+                                  <span>
+                                    {comparable.city &&
+                                      comparable.state
+                                      ? `${comparable.city}, ${comparable.state}`
+                                      : comparable.state ||
+                                      "—"}
+                                  </span>
+                                </div>
+                              );
+                            },
+                          )}
                       </div>
-
-                      <div className="comp-price">
-                        {currency(
-                          comp.price,
-                        )}
-                      </div>
-
-                      <div className="comp-details">
-                        <span>
-                          {formatMileage(
-                            comp.mileage,
-                          )}{" "}
-                          mi
-                        </span>
-
-                        <span>
-                          {comp.city &&
-                            comp.state
-                            ? `${comp.city}, ${comp.state}`
-                            : "Location unavailable"}
-                        </span>
-                      </div>
-
-                      {comp.listing_url && (
-                        <a
-                          href={
-                            comp.listing_url
-                          }
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          View listing
-                        </a>
-                      )}
-                    </article>
-                  ),
-                )}
+                    </div>
+                  )}
               </div>
-            </div>
+            )}
           </section>
-        )}
-    </main>
+        </section>
+      </main>
+
+      <footer className="site-footer">
+        <span>
+          Car Market Analyzer
+        </span>
+
+        <span>
+          Independent estimates based
+          on available market data.
+        </span>
+      </footer>
+    </div>
   );
 }
 

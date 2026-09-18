@@ -10,17 +10,24 @@
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  background: #0b0d12;
+
+  background: #0e1116;
 }
 
 html {
-  background: #0b0d12;
+  background: #0e1116;
 }
 
 body {
   margin: 0;
+
   min-width: 320px;
   min-height: 100vh;
+
+  background: #0e1116;
+
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button,
