@@ -1085,3 +1085,154 @@ button {
     flex-direction: column;
   }
 }
+
+/* ------------------------------------------------ */
+/* PRICE POSITION */
+/* ------------------------------------------------ */
+
+.price-position {
+  margin-top: 22px;
+
+  padding: 20px;
+
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+
+  background: var(--surface-soft);
+}
+
+.price-position-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  gap: 20px;
+}
+
+.price-position-heading>div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.price-position-heading span {
+  color: var(--text-muted);
+
+  font-size: 10px;
+}
+
+.price-position-heading>div>span {
+  font-weight: 650;
+
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.price-rank {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.price-rank.good {
+  color: var(--positive);
+}
+
+.price-rank.fair {
+  color: var(--text);
+}
+
+.price-rank.high {
+  color: var(--warning);
+}
+
+.price-scale {
+  margin-top: 24px;
+}
+
+.price-scale-segments {
+  margin-bottom: 8px;
+
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+
+  color: var(--text-muted);
+
+  font-size: 9px;
+}
+
+.price-scale-segments span:nth-child(2) {
+  text-align: center;
+}
+
+.price-scale-segments span:last-child {
+  text-align: right;
+}
+
+.price-track {
+  position: relative;
+
+  height: 7px;
+
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+
+  border-radius: 999px;
+
+  overflow: visible;
+}
+
+.price-track-good {
+  background: #3da876;
+
+  border-radius:
+    999px 0 0 999px;
+}
+
+.price-track-fair {
+  background: #c79b48;
+}
+
+.price-track-high {
+  background: #b75c5c;
+
+  border-radius:
+    0 999px 999px 0;
+}
+
+.price-marker {
+  position: absolute;
+  top: 50%;
+
+  transform:
+    translate(-50%, -50%);
+
+  width: 18px;
+  height: 18px;
+
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+
+  background: white;
+
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.price-scale-values {
+  margin-top: 10px;
+
+  display: flex;
+  justify-content: space-between;
+
+  gap: 20px;
+
+  color: var(--text-muted);
+
+  font-size: 10px;
+}
+
+.price-scale-values strong {
+  color: var(--text);
+
+  font-weight: 600;
+}

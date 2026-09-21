@@ -21,6 +21,7 @@ type Comparable = {
   city: string | null;
   state: string | null;
   listing_url: string | null;
+  image_url?: string | null;
 };
 
 type Vehicle = {
@@ -32,6 +33,7 @@ type Vehicle = {
   mileage: number;
   zip_code: string;
   state?: string | null;
+  image_url?: string | null;
 };
 
 type MarketAnalysis = {
@@ -227,6 +229,134 @@ async function getApiError(
   }
 
   return "Unable to analyze this vehicle.";
+}
+
+type PricePosition = {
+  label: string;
+  tone: "good" | "fair" | "high";
+  percent: number;
+};
+
+function getPurchasePricePosition(
+  dealerPrice: number | null,
+  range:
+    | {
+      low: number;
+      high: number;
+    }
+    | null,
+): PricePosition | null {
+  if (
+    dealerPrice == null ||
+    range == null ||
+    range.low <= 0 ||
+    range.high <= range.low
+  ) {
+    return null;
+  }
+
+  const width = range.high - range.low;
+
+  const scaleLow = Math.max(
+    0,
+    range.low - width,
+  );
+
+  const scaleHigh =
+    range.high + width;
+
+  const rawPercent =
+    ((dealerPrice - scaleLow) /
+      (scaleHigh - scaleLow)) *
+    100;
+
+  const percent = Math.min(
+    100,
+    Math.max(0, rawPercent),
+  );
+
+  if (dealerPrice < range.low) {
+    return {
+      label: "Strong price",
+      tone: "good",
+      percent,
+    };
+  }
+
+  if (dealerPrice <= range.high) {
+    return {
+      label: "Fair price",
+      tone: "fair",
+      percent,
+    };
+  }
+
+  return {
+    label: "Above fair range",
+    tone: "high",
+    percent,
+  };
+}
+
+function getTradePricePosition(
+  dealerOffer: number | null,
+  range:
+    | {
+      low: number;
+      high: number;
+    }
+    | null,
+): PricePosition | null {
+  if (
+    dealerOffer == null ||
+    range == null ||
+    range.low <= 0 ||
+    range.high <= range.low
+  ) {
+    return null;
+  }
+
+  const width = range.high - range.low;
+
+  const scaleLow = Math.max(
+    0,
+    range.low - width,
+  );
+
+  const scaleHigh =
+    range.high + width;
+
+  const rawPercent =
+    ((dealerOffer - scaleLow) /
+      (scaleHigh - scaleLow)) *
+    100;
+
+  const percent = Math.min(
+    100,
+    Math.max(0, rawPercent),
+  );
+
+  if (dealerOffer < range.low) {
+    return {
+      label: "Low offer",
+      tone: "high",
+      percent,
+    };
+  }
+
+  if (dealerOffer <= range.high) {
+    return {
+      label: "Fair offer",
+      tone: "fair",
+      percent,
+    };
+  }
+
+  return {
+    label: "Strong offer",
+    tone: "good",
+    percent,
+  };
 }
 
 function App() {
@@ -444,6 +574,17 @@ function App() {
   const tradeRange =
     result?.trade_valuation
       ?.trade_range ?? null;
+
+  const pricePosition =
+    mode === "buy"
+      ? getPurchasePricePosition(
+        dealerNumber,
+        purchaseRange,
+      )
+      : getTradePricePosition(
+        dealerNumber,
+        tradeRange,
+      );
 
   const topComparables =
     result?.market_analysis
@@ -938,6 +1079,87 @@ function App() {
                           )}
                         </strong>
                       </div>
+                      {pricePosition && (
+                        <div className="price-position">
+                          <div className="price-position-heading">
+                            <div>
+                              <span>Price position</span>
+
+                              <strong
+                                className={`price-rank ${pricePosition.tone}`}
+                              >
+                                {pricePosition.label}
+                              </strong>
+                            </div>
+
+                            <span>
+                              Based on estimated fair range
+                            </span>
+                          </div>
+
+                          <div className="price-scale">
+                            <div className="price-scale-segments">
+                              <span>Strong</span>
+                              <span>Fair</span>
+                              <span>
+                                {mode === "buy"
+                                  ? "High"
+                                  : "Strong"}
+                              </span>
+                            </div>
+
+                            <div className="price-track">
+                              <div className="price-track-good" />
+                              <div className="price-track-fair" />
+                              <div className="price-track-high" />
+
+                              <div
+                                className="price-marker"
+                                style={{
+                                  left: `${pricePosition.percent}%`,
+                                }}
+                              >
+                                <span />
+                              </div>
+                            </div>
+
+                            <div className="price-scale-values">
+                              <span>
+                                {mode === "buy"
+                                  ? purchaseRange
+                                    ? currency(
+                                      purchaseRange.low,
+                                    )
+                                    : "—"
+                                  : tradeRange
+                                    ? currency(
+                                      tradeRange.low,
+                                    )
+                                    : "—"}
+                              </span>
+
+                              <strong>
+                                Dealer:{" "}
+                                {currency(dealerNumber)}
+                              </strong>
+
+                              <span>
+                                {mode === "buy"
+                                  ? purchaseRange
+                                    ? currency(
+                                      purchaseRange.high,
+                                    )
+                                    : "—"
+                                  : tradeRange
+                                    ? currency(
+                                      tradeRange.high,
+                                    )
+                                    : "—"}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="comparison-numbers">
                         <div>
